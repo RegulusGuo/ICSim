@@ -25,6 +25,8 @@ You can run the following commands to setup a virtual can interface
   sudo modprobe vcan
   sudo ip link add dev vcan0 type vcan
   sudo ip link set up vcan0
+  sudo ip link add dev vcan1 type vcan
+  sudo ip link set up vcan1
 ```
 
 If you type ifconfig vcan0 you should see a vcan0 interface. A setup_vcan.sh file has also been provided with this
@@ -34,16 +36,25 @@ Usage
 -----
 Default operations:
 
-Start the Instrument Cluster (IC) simulator:
+Start the controls
 
 ```
-  ./icsim vcan0
-```
-
-Then startup the controls
-
-```
+  # send message to vcan0
   ./controls vcan0
+```
+
+Then start the gateway:
+
+```
+  # receive message from vcan0 then forward to vcan1
+  ./gateway vcan0 vcan1
+```
+
+Finally start the Instrument Cluster (IC) simulator:
+
+```
+  # recieve message from vcan1
+  ./icsim vcan1
 ```
 
 The hard coded defaults should be in sync and the controls should control the IC.  Ideally use a controller similar to
