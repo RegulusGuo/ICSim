@@ -31,10 +31,12 @@
 // 2 = Randomize unused bytes
 #define DEFAULT_DOOR_ID 411
 #define DEFAULT_DOOR_POS 2
+#define DEFAULT_DOOR_DIAG_ID 412
 #define DEFAULT_SIGNAL_ID 392
 #define DEFAULT_SIGNAL_POS 0
 #define DEFAULT_SPEED_ID 580
 #define DEFAULT_SPEED_POS 3
+#define DEFAULT_SPEED_DIAG_ID 581
 #define CAN_DOOR1_LOCK 1
 #define CAN_DOOR2_LOCK 2 
 #define CAN_DOOR3_LOCK 4
@@ -135,6 +137,7 @@ int throttle = 0;
 float current_speed = 0;
 int turning = 0;
 int door_id, signal_id, speed_id;
+int door_diag_id, speed_diag_id;
 int currentTime;
 int lastAccel = 0;
 int lastTurnSignal = 0;
@@ -202,6 +205,14 @@ void send_unlock(char door) {
 	send_pkt(CAN_MTU);
 }
 
+void send_door_req(void) {
+	memset(&cf, 0, sizeof(cf));
+	cf.can_id = door_diag_id;
+	cf.len = door_len;
+	cf.data[door_pos] = door_state;
+	send_pkt(CAN_MTU);
+}
+
 void send_speed() {
 	if (model) {
 		if (!strncmp(model, "bmw", 3)) {
@@ -235,6 +246,14 @@ void send_speed() {
 		if (speed_len != speed_pos + 2) randomize_pkt(speed_pos+2, speed_len);
 		send_pkt(CAN_MTU);
 	}
+}
+
+void send_speed_req(void) {
+	memset(&cf, 0, sizeof(cf));
+	cf.can_id = speed_diag_id;
+	cf.len = speed_len;
+	cf.data[speed_pos] = 0;
+	send_pkt(CAN_MTU);
 }
 
 void send_turn_signal() {
@@ -449,6 +468,14 @@ int main(int argc, char *argv[]) {
   int opt;
   struct sockaddr_can addr;
   struct canfd_frame frame;
+  struct iovec iov;
+  struct msghdr msg;
+  struct cmsghdr *cmsg;
+  struct timeval tv, timeout_config = { 0, 0 };
+  struct stat dirstat;
+  fd_set rdfs;
+  char ctrlmsg[CMSG_SPACE(sizeof(struct timeval)) + CMSG_SPACE(sizeof(__u32))];
+  int nbytes, maxdlen;
   int running = 1;
   int enable_canfd = 1;
   int play_traffic = 1;
@@ -512,14 +539,26 @@ int main(int argc, char *argv[]) {
        return 1;
   }
 
+  iov.iov_base = &frame;
+  iov.iov_len = sizeof(frame);
+  msg.msg_name = &addr;
+  msg.msg_namelen = sizeof(addr);
+  msg.msg_iov = &iov;
+  msg.msg_iovlen = 1;
+  msg.msg_control = &ctrlmsg;
+  msg.msg_controllen = sizeof(ctrlmsg);
+  msg.msg_flags = 0;
+
   if (bind(s, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
        perror("bind");
        return 1;
   }
 
   door_id = DEFAULT_DOOR_ID;
+  door_diag_id = DEFAULT_DOOR_DIAG_ID;
   signal_id = DEFAULT_SIGNAL_ID;
   speed_id = DEFAULT_SPEED_ID;
+  speed_diag_id = DEFAULT_SPEED_DIAG_ID;
 
   if (seed) {
 	srand(seed);
@@ -674,6 +713,12 @@ int main(int argc, char *argv[]) {
 				send_unlock(CAN_DOOR4_LOCK);
 			}
 			break;
+			case SDLK_d: // request for current speed
+			send_door_req();
+			break;
+			case SDLK_s: // request for current door status
+			send_speed_req();
+			break;
 		}
 		kk_check(event.key.keysym.sym);
 	   	break;
@@ -798,6 +843,44 @@ int main(int argc, char *argv[]) {
 		break;
         }
     }
+	nbytes = recvmsg(s, &msg, 0);
+    if (nbytes < 0) {
+    	perror("read");
+    	return 1;
+    }  
+    if ((size_t)nbytes == CAN_MTU)
+      	maxdlen = CAN_MAX_DLEN;
+    else if ((size_t)nbytes == CANFD_MTU)
+      	maxdlen = CANFD_MAX_DLEN;
+    else {
+    	fprintf(stderr, "read: incomplete CAN frame\n");
+    	return 1;
+    }
+    for (cmsg = CMSG_FIRSTHDR(&msg);
+         cmsg && (cmsg->cmsg_level == SOL_SOCKET);
+         cmsg = CMSG_NXTHDR(&msg,cmsg)) {
+           if (cmsg->cmsg_type == SO_TIMESTAMP)
+        		tv = *(struct timeval *)CMSG_DATA(cmsg);
+           else if (cmsg->cmsg_type == SO_RXQ_OVFL)
+             //dropcnt[i] = *(__u32 *)CMSG_DATA(cmsg);
+  	   			fprintf(stderr, "Dropped packet\n");
+    }
+	if(frame.can_id == door_diag_id) {
+		char door_state = frame.data[door_pos];
+		for (int i = 0; i < 4; i++) {
+			int unlock = door_state & 0x1;
+			printf("Door%d %s\n", i+1, unlock ? "unlocked" : "locked");
+			door_state >>= 1;
+		}
+		printf("\n");
+	}
+    if(frame.can_id == speed_diag_id) {
+		int speed = frame.data[speed_pos] << 8;
+		speed += frame.data[speed_pos + 1];
+		speed = speed / 100; // speed in kilometers
+		current_speed = speed * 0.6213751; // mph
+		printf("Current Speed: %f\n", current_speed);
+	}
     currentTime = SDL_GetTicks();
     checkAccel();
     checkTurn();

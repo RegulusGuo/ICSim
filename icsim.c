@@ -33,6 +33,7 @@
 #define ON 1
 #define DEFAULT_DOOR_ID 411 // 0x19b
 #define DEFAULT_DOOR_BYTE 2
+#define DEFAULT_DOOR_DIAG_ID 412
 #define CAN_DOOR1_LOCK 1
 #define CAN_DOOR2_LOCK 2 
 #define CAN_DOOR3_LOCK 4
@@ -43,6 +44,7 @@
 #define CAN_RIGHT_SIGNAL 2
 #define DEFAULT_SPEED_ID 580 // 0x244
 #define DEFAULT_SPEED_BYTE 3 // bytes 3,4
+#define DEFAULT_SPEED_DIAG_ID 581
 
 // For now, specific models will be done as constants.  Later
 // We should use a config file
@@ -53,6 +55,8 @@
 #define MODEL_BMW_X1_HANDBRAKE_ID 0x1B4  // Not implemented yet
 #define MODEL_BMW_X1_HANDBRAKE_BYTE 5
 
+int can; // socket
+struct canfd_frame cf;
 const int canfd_on = 1;
 int debug = 0;
 int randomize = 0;
@@ -60,6 +64,10 @@ int seed = 0;
 int door_pos = DEFAULT_DOOR_BYTE;
 int signal_pos = DEFAULT_SIGNAL_BYTE;
 int speed_pos = DEFAULT_SPEED_BYTE;
+int door_diag_id = DEFAULT_DOOR_DIAG_ID;
+int speed_diag_id = DEFAULT_SPEED_DIAG_ID;
+int door_len = DEFAULT_DOOR_BYTE + 1;
+int speed_len = DEFAULT_SPEED_BYTE + 2;
 long current_speed = 0;
 int door_status[4];
 int turn_status[2];
@@ -85,6 +93,12 @@ char *get_data(char *fname) {
   strncpy(data_file, DATA_DIR, 255);
   strncat(data_file, fname, 255-strlen(data_file));
   return data_file;
+}
+
+void send_pkt(struct canfd_frame *cf, int mtu) {
+  if(write(can, cf, mtu) != mtu) {
+	perror("write");
+  }
 }
 
 /* Default vehicle state */
@@ -250,6 +264,18 @@ void update_speed_status(struct canfd_frame *cf, int maxdlen) {
   SDL_RenderPresent(renderer);
 }
 
+void resp_speed_status(struct canfd_frame *cf, int maxdlen) {
+  memset(cf, 0, sizeof(struct canfd_frame));
+	cf->can_id = speed_diag_id;
+	cf->len = speed_len;
+
+  int kph = (current_speed / 0.6213751) * 100;
+  cf->data[speed_pos+1] = (char)kph & 0xff;
+	cf->data[speed_pos] = (char)(kph >> 8) & 0xff;
+	send_pkt(cf, CAN_MTU);
+  return;
+}
+
 /* Parses CAN frame and updates turn signal status */
 void update_signal_status(struct canfd_frame *cf, int maxdlen) {
   int len = (cf->len > maxdlen) ? maxdlen : cf->len;
@@ -296,6 +322,18 @@ void update_door_status(struct canfd_frame *cf, int maxdlen) {
   SDL_RenderPresent(renderer);
 }
 
+void resp_door_status(struct canfd_frame *cf, int maxdlen) {
+	memset(cf, 0, sizeof(struct canfd_frame));
+	cf->can_id = door_diag_id;
+	cf->len = door_len;
+  unsigned char door_state = 0;
+  for (int i = 3; i >= 0; i--) {
+    door_state = (door_state << 1) | door_status[i];
+  }
+	cf->data[door_pos] = door_state;
+	send_pkt(cf, CAN_MTU);
+}
+
 void Usage(char *msg) {
   if(msg) printf("%s\n", msg);
   printf("Usage: icsim [options] <can>\n");
@@ -308,7 +346,6 @@ void Usage(char *msg) {
 
 int main(int argc, char *argv[]) {
   int opt;
-  int can;
   struct ifreq ifr;
   struct sockaddr_can addr;
   struct canfd_frame frame;
@@ -392,8 +429,10 @@ int main(int argc, char *argv[]) {
   init_car_state();
 
   door_id = DEFAULT_DOOR_ID;
+  door_diag_id = DEFAULT_DOOR_DIAG_ID;
   signal_id = DEFAULT_SIGNAL_ID;
   speed_id = DEFAULT_SPEED_ID;
+  speed_diag_id = DEFAULT_SPEED_DIAG_ID;
 
   if (randomize || seed) {
 	if(randomize) seed = time(NULL);
@@ -462,32 +501,34 @@ int main(int argc, char *argv[]) {
       SDL_Delay(3);
     }
 
-      nbytes = recvmsg(can, &msg, 0);
-      if (nbytes < 0) {
-        perror("read");
-        return 1;
-      }  
-      if ((size_t)nbytes == CAN_MTU)
-        maxdlen = CAN_MAX_DLEN;
-      else if ((size_t)nbytes == CANFD_MTU)
-        maxdlen = CANFD_MAX_DLEN;
-      else {
-        fprintf(stderr, "read: incomplete CAN frame\n");
-        return 1;
-      }
-      for (cmsg = CMSG_FIRSTHDR(&msg);
-           cmsg && (cmsg->cmsg_level == SOL_SOCKET);
-           cmsg = CMSG_NXTHDR(&msg,cmsg)) {
-             if (cmsg->cmsg_type == SO_TIMESTAMP)
-               tv = *(struct timeval *)CMSG_DATA(cmsg);
-             else if (cmsg->cmsg_type == SO_RXQ_OVFL)
-               //dropcnt[i] = *(__u32 *)CMSG_DATA(cmsg);
-  	     fprintf(stderr, "Dropped packet\n");
-             }
-//      if(debug) fprint_canframe(stdout, &frame, "\n", 0, maxdlen);
-      if(frame.can_id == door_id) update_door_status(&frame, maxdlen);
-      if(frame.can_id == signal_id) update_signal_status(&frame, maxdlen);
-      if(frame.can_id == speed_id) update_speed_status(&frame, maxdlen);
+    nbytes = recvmsg(can, &msg, 0);
+    if (nbytes < 0) {
+      perror("read");
+      return 1;
+    }  
+    if ((size_t)nbytes == CAN_MTU)
+      maxdlen = CAN_MAX_DLEN;
+    else if ((size_t)nbytes == CANFD_MTU)
+      maxdlen = CANFD_MAX_DLEN;
+    else {
+      fprintf(stderr, "read: incomplete CAN frame\n");
+      return 1;
+    }
+    for (cmsg = CMSG_FIRSTHDR(&msg);
+         cmsg && (cmsg->cmsg_level == SOL_SOCKET);
+         cmsg = CMSG_NXTHDR(&msg,cmsg)) {
+           if (cmsg->cmsg_type == SO_TIMESTAMP)
+             tv = *(struct timeval *)CMSG_DATA(cmsg);
+           else if (cmsg->cmsg_type == SO_RXQ_OVFL)
+             //dropcnt[i] = *(__u32 *)CMSG_DATA(cmsg);
+  	   fprintf(stderr, "Dropped packet\n");
+           }
+//     if(debug) fprint_canframe(stdout, &frame, "\n", 0, maxdlen);
+    if(frame.can_id == door_id) update_door_status(&frame, maxdlen);
+    if(frame.can_id == signal_id) update_signal_status(&frame, maxdlen);
+    if(frame.can_id == speed_id) update_speed_status(&frame, maxdlen);
+    if(frame.can_id == door_diag_id) resp_door_status(&frame, maxdlen);
+    if(frame.can_id == speed_diag_id) resp_speed_status(&frame, maxdlen);
   }
 
   SDL_DestroyTexture(base_texture);
