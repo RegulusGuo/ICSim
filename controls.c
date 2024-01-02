@@ -19,6 +19,7 @@
 #include <linux/can/raw.h>
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
+#include <openssl/evp.h>
 
 #ifndef DATA_DIR
 #define DATA_DIR "./data/"
@@ -92,6 +93,7 @@
 #define MODEL_BMW_X1_RPM_BYTE 4
 #define MODEL_BMW_X1_HANDBRAKE_ID 0x1B4  // Not implemented yet
 #define MODEL_BMW_X1_HANDBRAKE_BYTE 5
+#define BLOCK_SIZE 16
 
 
 int gButtonY = BUTTON_Y;
@@ -115,7 +117,8 @@ int gJoyZ = JOY_UNKNOWN;
 //Analog joystick dead zone
 const int JOYSTICK_DEAD_ZONE = 8000;
 int gLastAccelValue = 0; // Non analog R2
-
+unsigned char *key = (unsigned char *)"AAAAAAAAAAAAAAAA";
+unsigned char *iv = (unsigned char *)"BBBBBBBBBBBBBBBB";
 int s; // socket
 struct canfd_frame cf;
 char *traffic_log = DEFAULT_CAN_TRAFFIC;
@@ -156,6 +159,10 @@ SDL_Texture *base_texture = NULL;
 int gControllerType = USB_CONTROLLER;
 
 void kk_check(int);
+ 
+void handleErrors(void);
+static void aes_encrypt(unsigned char *in, unsigned char *out, unsigned char *key, unsigned char *iv);
+static void aes_decrypt(unsigned char *in, unsigned char *out, unsigned char *key, unsigned char *iv);
 
 // Adds data dir to file name
 // Uses a single pointer so not to have a memory leak
@@ -185,23 +192,82 @@ void randomize_pkt(int start, int stop) {
 
 void send_lock(char door) {
 	door_state |= door;
+	int state = door_state;
 	memset(&cf, 0, sizeof(cf));
 	cf.can_id = door_id;
 	cf.len = door_len;
 	cf.data[door_pos] = door_state;
 	if (door_pos) randomize_pkt(0, door_pos);
 	if (door_len != door_pos + 1) randomize_pkt(door_pos + 1, door_len);
+	unsigned char *plain_text = (unsigned char *)"DOORLUCRUCLDCRDC";
+	unsigned char ciphertext[32];	
+	if ((state & 0x01) == 0){
+		plain_text[6] = 'O';
+	}
+	if ((state & 0x02) == 0){
+		plain_text[9] = 'O';
+	}
+	if ((state & 0x04) == 0){
+		plain_text[12] = 'O';
+	}
+	if ((state & 0x08) == 0){
+		plain_text[15] = 'O';
+	}
+	aes_encrypt(plain_text,ciphertext,key,iv);
+	printf("PlainText:");
+	for (int i = 0;i<16;i++){
+		printf("%c",plain_text[i]);
+	}
+	printf("\nCipherText:");
+	for (int i = 0;i<32;i++){
+		printf("%02X",ciphertext[i]);
+	}
+	printf("\nDText:");
+	for (int i = 0;i<16;i++){
+		printf("%c",plain_text[i]);
+	}
+	printf("\n");
 	send_pkt(CAN_MTU);
 }
 
 void send_unlock(char door) {
 	door_state &= ~door;
+	int state = door_state;
 	memset(&cf, 0, sizeof(cf));
 	cf.can_id = door_id;
 	cf.len = door_len;
 	cf.data[door_pos] = door_state;
 	if (door_pos) randomize_pkt(0, door_pos);
 	if (door_len != door_pos + 1) randomize_pkt(door_pos + 1, door_len);
+	unsigned char plain_text[16] = "DOORLUCRUCLDCRDC";
+	unsigned char ciphertext[32];
+	//printf("%d",door_state);	
+	if ((state & 0x01) == 0x00){
+		plain_text[6] = 'O';
+	}
+	if ((state & 0x02) == 0x00){
+		plain_text[9] = 'O';
+	}
+	if ((state & 0x04) == 0x00){
+		plain_text[12] = 'O';
+	}
+	if ((state & 0x08) == 0x00){
+		plain_text[15] = 'O';
+	}
+	aes_encrypt(plain_text,ciphertext,key,iv);
+	printf("PlainText:");
+	for (int i = 0;i<16;i++){
+		printf("%c",plain_text[i]);
+	}
+	printf("\nCipherText:");
+	for (int i = 0;i<32;i++){
+		printf("%02X",ciphertext[i]);
+	}
+	printf("\nDText:");
+	for (int i = 0;i<16;i++){
+		printf("%c",plain_text[i]);
+	}
+	printf("\n");
 	send_pkt(CAN_MTU);
 }
 
@@ -209,7 +275,13 @@ void send_door_req(void) {
 	memset(&cf, 0, sizeof(cf));
 	cf.can_id = door_diag_id;
 	cf.len = door_len;
-	cf.data[door_pos] = door_state;
+	cf.data[door_pos] = 0;
+	/*unsigned char *plain_text = (unsigned char *)"Status of  Doors";
+	unsigned char ciphertext[32];	
+	aes_encrypt(plain_text,ciphertext,key,iv);
+	printf("PlainText:%s\n",plain_text);
+	printf("CipherText:%s\n",ciphertext);
+	printf("DText:%s\n",plain_text);*/
 	send_pkt(CAN_MTU);
 }
 
@@ -229,6 +301,13 @@ void send_speed() {
 		        }
 		        if (speed_pos) randomize_pkt(0, speed_pos);
 		        if (speed_len != speed_pos + 2) randomize_pkt(speed_pos+2, speed_len);
+				/*unsigned char *plain_text = (unsigned char *)"Speed To 0000BNW";
+				unsigned char ciphertext[32];
+				sprintf(&plain_text[9],"%02X",(char)a & 0xff);
+				sprintf(&plain_text[11],"%02X",(char)b & 0xff);	
+				cf.can_id = 0;
+				cf.len = 0;
+				aes_encrypt(plain_text,ciphertext,key,iv);*/
 		        send_pkt(CAN_MTU);
 		}
 	} else {
@@ -244,6 +323,16 @@ void send_speed() {
 		}
 		if (speed_pos) randomize_pkt(0, speed_pos);
 		if (speed_len != speed_pos + 2) randomize_pkt(speed_pos+2, speed_len);
+		/*unsigned char *plain_text = (unsigned char *)"Speed To 0000ETC";	
+		unsigned char ciphertext[32];
+		cf.can_id = 0;
+		cf.len = 0;
+		unsigned char s[10];
+		sprintf(s,"%02X",(char)(kph >> 8) & 0xff);
+		strncpy(&plain_text[9],s,2);
+		sprintf(s,"%02X",(char)(kph) & 0xff);
+		strncpy(&plain_text[11],s,2);	
+		aes_encrypt(plain_text,ciphertext,key,iv);*/
 		send_pkt(CAN_MTU);
 	}
 }
@@ -253,6 +342,13 @@ void send_speed_req(void) {
 	cf.can_id = speed_diag_id;
 	cf.len = speed_len;
 	cf.data[speed_pos] = 0;
+	/*unsigned char *plain_text = (unsigned char *)"Status of  Speed";
+	unsigned char ciphertext[32];	
+	cf.can_id = 0;
+	cf.len = 0;
+	aes_encrypt(plain_text,ciphertext,key,iv);
+	printf("%s\n",plain_text);
+	printf("%s\n",ciphertext);*/
 	send_pkt(CAN_MTU);
 }
 
@@ -263,6 +359,16 @@ void send_turn_signal() {
 	cf.data[signal_pos] = signal_state;
 	if(signal_pos) randomize_pkt(0, signal_pos);
 	if(signal_len != signal_pos + 1) randomize_pkt(signal_pos+1, signal_len);
+	/*unsigned char *plain_text = (unsigned char *)"Turn Left Lighto";	
+	cf.can_id = 0;
+	cf.len = 0;
+	if (signal_state & CAN_RIGHT_SIGNAL == CAN_RIGHT_SIGNAL){
+		plain_text = (unsigned char *)"Turn Right Light";
+	}
+	unsigned char ciphertext[32];
+	aes_encrypt(plain_text,ciphertext,key,iv);
+	printf("%s\n",plain_text);
+	printf("%s\n",ciphertext);*/
 	send_pkt(CAN_MTU);
 }
 
@@ -652,7 +758,6 @@ int main(int argc, char *argv[]) {
   SDL_RenderCopy(renderer, base_texture, NULL, NULL);
   SDL_RenderPresent(renderer);
   int button, axis; // Used for checking dynamic joystick mappings
-
   while(running) {
     while( SDL_PollEvent(&event) != 0 ) {
         switch(event.type) {
@@ -895,4 +1000,64 @@ int main(int argc, char *argv[]) {
   SDL_DestroyWindow(window);
   SDL_Quit();
 
+}
+void handleErrors(void)
+{
+    printf("Error: openssl internal error.\n");
+    ERR_print_errors_fp(stderr);
+    exit(EXIT_FAILURE);
+}
+static void aes_encrypt(unsigned char *in, unsigned char *out, unsigned char *key, unsigned char *iv)
+{
+    EVP_CIPHER_CTX *ctx;
+    int in_len = strlen((const char *)in);
+    int out_len = 0;
+    ctx = EVP_CIPHER_CTX_new();
+    if (ctx == NULL) {
+        printf("Error: EVP_CIPHER_CTX_new() failed.\n");
+        exit(EXIT_FAILURE);
+    }
+    EVP_CIPHER_CTX_init(ctx);
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv) != 1) {
+        printf("Error: EVP_EncryptInit_ex() failed.\n");
+        handleErrors();
+    }
+    if (EVP_EncryptUpdate(ctx, out, &out_len, in, in_len) != 1) {
+        printf("Error: EVP_EncryptUpdate() failed.\n");
+        handleErrors();
+    }
+    int final_len = 0;
+    if (EVP_EncryptFinal_ex(ctx, out + out_len, &final_len) != 1) {
+        printf("Error: EVP_EncryptFinal_ex() failed.\n");
+        handleErrors();
+    }
+    out_len += final_len;
+    EVP_CIPHER_CTX_free(ctx);
+}
+static void aes_decrypt(unsigned char *in, unsigned char *out, unsigned char *key, unsigned char *iv)
+{
+    EVP_CIPHER_CTX *ctx;
+    int in_len = strlen((const char *)in);
+    int out_len = 0;
+    ctx = EVP_CIPHER_CTX_new();
+    if (ctx == NULL) {
+        printf("Error: EVP_CIPHER_CTX_new() failed.\n");
+        exit(EXIT_FAILURE);
+    }
+    EVP_CIPHER_CTX_init(ctx);
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_128_cbc(), NULL, key, iv) != 1) {
+        printf("Error: EVP_DecryptInit_ex() failed.\n");
+        handleErrors();
+    }
+    if (EVP_DecryptUpdate(ctx, out, &out_len, in, in_len) != 1) {
+        printf("Error: EVP_DecryptUpdate() failed.\n");
+        handleErrors();
+    }
+    int final_len = 0;
+    if (EVP_DecryptFinal_ex(ctx, out + out_len, &final_len) != 1) {
+        printf("Error: EVP_DecryptFinal_ex() failed.\n");
+        handleErrors();
+    }
+    out_len += final_len;
+    EVP_CIPHER_CTX_free(ctx);
 }
